@@ -35,7 +35,7 @@ the copyleft obligations while still crediting the author.
 **To obtain a commercial license, contact:**
 
 > Manuel Miguel Fernandez-Gallego Olivares — AEGIR Security
-> *(add your preferred contact email / form here)*
+> manuelfdzgo@gmail.com
 
 ## Why dual-licensing
 
