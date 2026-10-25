@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="Huginn — LLM red-team payload harness" width="100%">
+</p>
+
 # Huginn 🐦‍⬛
 
 **An interactive LLM red-team payload harness — the "Burp Repeater/Proxy" for chatbots.**
