@@ -1,0 +1,17 @@
+Huginn — LLM red-team payload harness
+Copyright (C) 2026 Manuel Miguel Fernandez-Gallego Olivares (AEGIR Security)
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+A commercial license is available for proprietary/closed-source use — see
+COMMERCIAL.md.
+
+If you use Huginn or build on it, attribution to the original author is
+required under the AGPL. A mention and a link back are appreciated.

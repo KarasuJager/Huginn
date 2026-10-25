@@ -1,0 +1,15 @@
+# Huginn runtime artifacts
+history.jsonl
+*.jsonl
+!payloads/*.json
+
+# Local target profiles may carry tokens/secrets — don't commit real ones
+config/*.json
+!config/target.example.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env

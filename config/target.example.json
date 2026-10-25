@@ -1,0 +1,18 @@
+{
+  "name": "mock-local-bot",
+  "url": "http://127.0.0.1:8900/chat",
+  "method": "POST",
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Bug-Bounty": "Manuel_Miguel",
+    "User-Agent": "huginn-redteam (+manuelfdzgo@gmail.com)"
+  },
+  "body_template": {
+    "messages": [
+      {"role": "user", "content": "{{PAYLOAD}}"}
+    ]
+  },
+  "response_path": "choices.0.message.content",
+  "rate_limit_seconds": 0.0,
+  "scope_host": "127.0.0.1"
+}
