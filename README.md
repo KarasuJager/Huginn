@@ -136,6 +136,9 @@ code:
   `max_retries` (default 2), honouring `Retry-After`.
 - `cross_tenant` — the planted-secret workflow (see below). `messages_path` —
   optional dotted path to the messages array for multi-turn, auto-detected otherwise.
+- `stream` — set `true` (or just let content-type `text/event-stream` auto-detect)
+  to reassemble replies from Server-Sent Events; `stream_paths` are the dotted
+  paths tried per chunk for the delta (OpenAI-style `choices.0.delta.content` etc.).
 
 ### Cross-tenant testing (planted secret)
 
