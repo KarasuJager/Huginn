@@ -29,6 +29,7 @@ from .detectors import analyze, is_interesting, Hit
 from .library import Payload
 
 CANARY_TOKEN = "{{CANARY}}"
+LOOKUP_TOKEN = "{{LOOKUP}}"
 
 
 def mint_canary() -> str:
@@ -78,7 +79,8 @@ class Sender:
 
     def send_raw(self, text: str, phase: str = "manual",
                  payload_id: str = "manual", canary: str | None = None,
-                 detect: list | None = None) -> SendResult:
+                 detect: list | None = None,
+                 bside_secret: str | None = None) -> SendResult:
         """Send one arbitrary message. The primitive behind every higher tool."""
         self.target.check_scope()  # raises ScopeViolation if out of scope
         self._respect_rate_limit()
@@ -118,7 +120,8 @@ class Sender:
             self._append_history(result)
             return result
 
-        hits = analyze(result.reply, text, canary, extra_patterns=detect)
+        hits = analyze(result.reply, text, canary, extra_patterns=detect,
+                       phase=phase, bside_secret=bside_secret)
         result.hits = hits
         result.interesting = is_interesting(hits)
         self._append_history(result)
@@ -127,10 +130,81 @@ class Sender:
     def send_payload(self, payload: Payload) -> SendResult:
         """Send a library payload, minting a canary if it needs one."""
         canary = None
+        bside_secret = None
         text = payload.text
-        if payload.needs_canary or CANARY_TOKEN in text:
+
+        # Cross-tenant probes ask about a LOOKUP term and look for a B-side secret
+        # planted in another tenant. The canary is NOT used here (reflecting a token
+        # we sent proves nothing); detection relies on the planted secret instead.
+        if LOOKUP_TOKEN in text:
+            lookup = self.target.cross_tenant_lookup
+            if not lookup:
+                ts = datetime.now(timezone.utc).isoformat()
+                res = SendResult(
+                    ts=ts, phase=payload.phase, payload_id=payload.id, canary=None,
+                    url=self.target.url, status_code=None, latency_ms=None,
+                    sent_text=text, reply="",
+                    error="cross_tenant lookup not configured: add a 'cross_tenant' "
+                          "block ({lookup, bside_secret}) to the target profile.",
+                )
+                self._append_history(res)
+                return res
+            text = text.replace(LOOKUP_TOKEN, lookup)
+            bside_secret = self.target.cross_tenant_bside
+        elif payload.needs_canary or CANARY_TOKEN in text:
             canary = mint_canary()
             text = text.replace(CANARY_TOKEN, canary)
+
         return self.send_raw(
             text, phase=payload.phase, payload_id=payload.id,
-            canary=canary, detect=payload.detect)
+            canary=canary, detect=payload.detect, bside_secret=bside_secret)
+
+    def send_messages(self, messages: list[dict], phase: str = "manual",
+                      payload_id: str = "manual", canary: str | None = None,
+                      detect: list | None = None,
+                      bside_secret: str | None = None) -> SendResult:
+        """Send a full conversation (multi-turn) and analyze the latest reply.
+
+        `messages` is the accumulated [{role, content}, ...]; the detectors run
+        against the last user turn so canary/secret logic is unchanged.
+        """
+        self.target.check_scope()
+        self._respect_rate_limit()
+
+        last_user = next((m["content"] for m in reversed(messages)
+                          if m.get("role") == "user"), "")
+        headers = self.target.build_headers()
+        body = self.target.build_body_messages(messages)
+        ts = datetime.now(timezone.utc).isoformat()
+        t0 = time.time()
+        result = SendResult(
+            ts=ts, phase=phase, payload_id=payload_id, canary=canary,
+            url=self.target.url, status_code=None, latency_ms=None,
+            sent_text=last_user, reply="",
+        )
+        try:
+            resp = self.session.request(
+                self.target.method, self.target.url, headers=headers,
+                json=body, timeout=self.target.timeout)
+            self._last_send = time.time()
+            result.status_code = resp.status_code
+            result.latency_ms = int((time.time() - t0) * 1000)
+            try:
+                resp_json = resp.json()
+            except ValueError:
+                resp_json = None
+            result.reply = self.target.extract_reply(resp_json, resp.text)
+        except ScopeViolation:
+            raise
+        except Exception as exc:
+            self._last_send = time.time()
+            result.error = f"{type(exc).__name__}: {exc}"
+            self._append_history(result)
+            return result
+
+        hits = analyze(result.reply, last_user, canary, extra_patterns=detect,
+                       phase=phase, bside_secret=bside_secret)
+        result.hits = hits
+        result.interesting = is_interesting(hits)
+        self._append_history(result)
+        return result
