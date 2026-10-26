@@ -127,8 +127,13 @@ code:
 - `${ENV_VAR}` — expanded from the environment, so tokens never live in the repo.
 - `response_path` — dotted path (supports list indices) to pull the reply out of
   a JSON response; falls back to raw body text.
-- `scope_host` — **enforced before every request.** Off-scope URL → refused.
+- `scope_host` / `scope_hosts` — **enforced before every request.** An allowlist
+  of in-scope hosts (exact, or leading-wildcard `*.example.com`). Off-scope → refused.
 - `rate_limit_seconds` — minimum gap between sends.
+- `require_identification` (default `true`) — refuse to send unless the traffic is
+  attributable (an `X-Bug-Bounty`-style header, or a researcher `User-Agent`). Set
+  `false` to override. On HTTP 429/503 Huginn backs off and retries up to
+  `max_retries` (default 2), honouring `Retry-After`.
 - `cross_tenant` — the planted-secret workflow (see below). `messages_path` —
   optional dotted path to the messages array for multi-turn, auto-detected otherwise.
 

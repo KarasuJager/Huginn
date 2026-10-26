@@ -40,7 +40,7 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.target import Target, ScopeViolation
+from core.target import Target, ScopeViolation, ComplianceError
 from core.sender import Sender, mint_canary, CANARY_TOKEN
 from core import library
 
@@ -184,6 +184,7 @@ def t_reset_conversation(args: dict) -> dict:
 def t_run_phase(args: dict) -> dict:
     target = Target.load(args["target"])
     target.check_scope()
+    target.check_identification()
     sender = Sender(target, history_path=DEFAULT_HISTORY)
     payloads = library.load(args.get("phase", "all"))
     cap = int(args.get("max", 0) or 0)
@@ -292,6 +293,10 @@ def handle(msg: dict):
         except ScopeViolation as exc:
             return {"jsonrpc": "2.0", "id": mid, "result": {
                 "content": [{"type": "text", "text": f"SCOPE REFUSED: {exc}"}],
+                "isError": True}}
+        except ComplianceError as exc:
+            return {"jsonrpc": "2.0", "id": mid, "result": {
+                "content": [{"type": "text", "text": f"COMPLIANCE REFUSED: {exc}"}],
                 "isError": True}}
         except Exception as exc:  # noqa
             log("tool error:", type(exc).__name__, exc)

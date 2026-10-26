@@ -24,7 +24,7 @@ from typing import Any
 
 import requests
 
-from .target import Target, ScopeViolation
+from .target import Target, ScopeViolation, ComplianceError
 from .detectors import analyze, is_interesting, Hit
 from .library import Payload
 
@@ -34,6 +34,17 @@ LOOKUP_TOKEN = "{{LOOKUP}}"
 
 def mint_canary() -> str:
     return "HGN-" + secrets.token_hex(4).upper()
+
+
+def _retry_after(resp) -> float | None:
+    """Parse a Retry-After header (seconds only). Returns None if absent/unparseable."""
+    val = resp.headers.get("Retry-After")
+    if not val:
+        return None
+    try:
+        return max(0.0, float(val))
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -71,6 +82,26 @@ class Sender:
         if wait > 0:
             time.sleep(wait)
 
+    def _request(self, headers: dict, *, json_body: Any = None, data_body: Any = None):
+        """Do the HTTP request, backing off and retrying on 429/503 while honouring
+        Retry-After, up to target.max_retries extra attempts."""
+        attempts = max(0, self.target.max_retries) + 1
+        resp = None
+        for i in range(attempts):
+            if json_body is not None:
+                resp = self.session.request(
+                    self.target.method, self.target.url, headers=headers,
+                    json=json_body, timeout=self.target.timeout)
+            else:
+                resp = self.session.request(
+                    self.target.method, self.target.url, headers=headers,
+                    data=str(data_body), timeout=self.target.timeout)
+            if resp.status_code in (429, 503) and i < attempts - 1:
+                time.sleep(_retry_after(resp) or min(2 ** i, 30))
+                continue
+            break
+        return resp
+
     def _append_history(self, result: SendResult) -> None:
         if not self.log:
             return
@@ -82,7 +113,8 @@ class Sender:
                  detect: list | None = None,
                  bside_secret: str | None = None) -> SendResult:
         """Send one arbitrary message. The primitive behind every higher tool."""
-        self.target.check_scope()  # raises ScopeViolation if out of scope
+        self.target.check_scope()           # raises ScopeViolation if out of scope
+        self.target.check_identification()  # raises ComplianceError if unidentified
         self._respect_rate_limit()
 
         headers = self.target.build_headers()
@@ -96,13 +128,9 @@ class Sender:
         )
         try:
             if isinstance(body, (dict, list)):
-                resp = self.session.request(
-                    self.target.method, self.target.url, headers=headers,
-                    json=body, timeout=self.target.timeout)
+                resp = self._request(headers, json_body=body)
             else:
-                resp = self.session.request(
-                    self.target.method, self.target.url, headers=headers,
-                    data=str(body), timeout=self.target.timeout)
+                resp = self._request(headers, data_body=body)
             self._last_send = time.time()
             result.status_code = resp.status_code
             result.latency_ms = int((time.time() - t0) * 1000)
@@ -169,6 +197,7 @@ class Sender:
         against the last user turn so canary/secret logic is unchanged.
         """
         self.target.check_scope()
+        self.target.check_identification()
         self._respect_rate_limit()
 
         last_user = next((m["content"] for m in reversed(messages)
@@ -183,9 +212,7 @@ class Sender:
             sent_text=last_user, reply="",
         )
         try:
-            resp = self.session.request(
-                self.target.method, self.target.url, headers=headers,
-                json=body, timeout=self.target.timeout)
+            resp = self._request(headers, json_body=body)
             self._last_send = time.time()
             result.status_code = resp.status_code
             result.latency_ms = int((time.time() - t0) * 1000)
