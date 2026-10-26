@@ -18,7 +18,9 @@ Config block (claude_desktop_config.json):
     }
 
 Tools:
-    chat_send(target, message)            -> send one message, return reply + hits
+    chat_send(target, message, conversation_id, reset)
+                                          -> send one turn in a multi-turn thread, return reply + hits
+    reset_conversation(conversation_id)   -> drop a thread's turns + session
     run_phase(target, phase, max)         -> fire a phase battery, return triage
     review(history, only_interesting)     -> read a history file back
     list_payloads(phase)                  -> list available probes
@@ -34,6 +36,8 @@ import json
 import os
 import sys
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.target import Target, ScopeViolation
@@ -43,6 +47,12 @@ from core import library
 SERVER_NAME = "huginn"
 SERVER_VERSION = "0.1.0"
 DEFAULT_HISTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.jsonl")
+
+# Live multi-turn state, keyed by conversation_id. Each conversation keeps its own
+# running message history and its own HTTP session (so cookies / auth persist across
+# turns), which is what makes interactive, multi-step probing actually multi-turn.
+_CONVOS: dict[str, list[dict]] = {}
+_SESSIONS: dict[str, requests.Session] = {}
 
 
 def log(*a):
@@ -56,14 +66,26 @@ def log(*a):
 TOOLS = [
     {
         "name": "chat_send",
-        "description": "Send ONE message to the target chatbot and return its raw reply plus any detector hits. The primitive for live, interactive probing. Logs to history.jsonl.",
+        "description": "Send ONE message to the target chatbot within a running multi-turn conversation and return its raw reply plus any detector hits. Prior turns in the same conversation_id are resent as context, so multi-step attacks (build trust, then escalate) work. The primitive for live, interactive probing. Logs to history.jsonl.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "target": {"type": "string", "description": "Path to the target profile JSON."},
                 "message": {"type": "string", "description": "The exact message to send. Use the literal {{CANARY}} to have a unique token minted and detected automatically."},
+                "conversation_id": {"type": "string", "description": "Thread to append this turn to; prior turns are resent as context. Defaults to 'default'.", "default": "default"},
+                "reset": {"type": "boolean", "description": "Start this conversation fresh (drop prior turns and session) before sending.", "default": False},
             },
             "required": ["target", "message"],
+        },
+    },
+    {
+        "name": "reset_conversation",
+        "description": "Forget a live conversation's accumulated turns and HTTP session so the next chat_send starts clean.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_id": {"type": "string", "default": "default"},
+            },
         },
     },
     {
@@ -125,14 +147,38 @@ def _sender(target_path: str, history: str | None = None) -> Sender:
 
 
 def t_chat_send(args: dict) -> dict:
-    sender = _sender(args["target"])
+    cid = args.get("conversation_id") or "default"
+    if args.get("reset"):
+        _CONVOS.pop(cid, None)
+        _SESSIONS.pop(cid, None)
+
+    target = Target.load(args["target"])
+    session = _SESSIONS.setdefault(cid, requests.Session())
+    sender = Sender(target, history_path=DEFAULT_HISTORY, session=session)
+
     message = args["message"]
     canary = None
     if CANARY_TOKEN in message:
         canary = mint_canary()
         message = message.replace(CANARY_TOKEN, canary)
-    res = sender.send_raw(message, phase="manual", payload_id="manual", canary=canary)
-    return res.to_dict()
+
+    history = _CONVOS.setdefault(cid, [])
+    history.append({"role": "user", "content": message})
+    res = sender.send_messages(history, phase="manual", payload_id="manual", canary=canary)
+    history.append({"role": "assistant", "content": res.reply})
+
+    out = res.to_dict()
+    out["conversation_id"] = cid
+    out["turn"] = sum(1 for m in history if m["role"] == "user")
+    return out
+
+
+def t_reset_conversation(args: dict) -> dict:
+    cid = args.get("conversation_id") or "default"
+    existed = cid in _CONVOS or cid in _SESSIONS
+    _CONVOS.pop(cid, None)
+    _SESSIONS.pop(cid, None)
+    return {"conversation_id": cid, "reset": True, "existed": existed}
 
 
 def t_run_phase(args: dict) -> dict:
@@ -199,6 +245,7 @@ def t_add_payload(args: dict) -> dict:
 
 DISPATCH = {
     "chat_send": t_chat_send,
+    "reset_conversation": t_reset_conversation,
     "run_phase": t_run_phase,
     "review": t_review,
     "list_payloads": t_list_payloads,

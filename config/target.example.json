@@ -14,5 +14,9 @@
   },
   "response_path": "choices.0.message.content",
   "rate_limit_seconds": 0.0,
-  "scope_host": "127.0.0.1"
+  "scope_host": "127.0.0.1",
+  "cross_tenant": {
+    "lookup": "Project Zafiro",
+    "bside_secret": "HGN-BSIDE-5A17C3D2"
+  }
 }

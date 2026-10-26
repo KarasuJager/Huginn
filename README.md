@@ -89,11 +89,16 @@ Tools exposed:
 
 | Tool | Does |
 |------|------|
-| `chat_send(target, message)` | send ONE message, return the raw reply + hits |
+| `chat_send(target, message, conversation_id, reset)` | send ONE turn in a **multi-turn** thread (prior turns are resent as context), return the raw reply + hits |
+| `reset_conversation(conversation_id)` | drop a thread's accumulated turns + HTTP session |
 | `run_phase(target, phase, max)` | fire a phase battery, return a triage |
 | `review(history, only_interesting)` | read a history file back |
 | `list_payloads(phase)` | list available probes |
 | `add_payload(phase, text, title, detect)` | add a probe to the library (persisted) |
+
+Live probing is multi-turn: reuse the same `conversation_id` across `chat_send`
+calls to build trust and then escalate; the whole history (and a persistent HTTP
+session) is carried across turns. Start fresh with `reset` or `reset_conversation`.
 
 ## Target profiles
 
@@ -113,7 +118,8 @@ code:
   "body_template": {"messages": [{"role": "user", "content": "{{PAYLOAD}}"}]},
   "response_path": "choices.0.message.content",
   "rate_limit_seconds": 2.0,
-  "scope_host": "api.example.com"
+  "scope_host": "api.example.com",
+  "cross_tenant": {"lookup": "Project Zafiro", "bside_secret": "HGN-BSIDE-5A17C3D2"}
 }
 ```
 
@@ -123,6 +129,18 @@ code:
   a JSON response; falls back to raw body text.
 - `scope_host` — **enforced before every request.** Off-scope URL → refused.
 - `rate_limit_seconds` — minimum gap between sends.
+- `cross_tenant` — the planted-secret workflow (see below). `messages_path` —
+  optional dotted path to the messages array for multi-turn, auto-detected otherwise.
+
+### Cross-tenant testing (planted secret)
+
+A real tenant-isolation leak is only proven when content from **another** tenant
+comes back. So: in tenant B (which you also control/are authorised for), seed a
+unique `bside_secret` into the knowledge base under a known `lookup` term. Then
+run the `cross_tenant` phase from tenant A. The `ct-004` probe asks about the
+`lookup`; the `cross_tenant_leak` detector fires only if the `bside_secret`
+appears in the reply **without ever having been sent** — so merely reflecting the
+lookup term is not flagged (no false positive).
 
 ## Responsible use
 
@@ -148,6 +166,7 @@ huginn/
 │   ├── detectors.py       # canary / heuristic signal detection
 │   └── library.py         # payload loading & authoring
 ├── payloads/              # probes by phase (JSON)
+├── tests/                 # unit tests (detectors)
 └── config/target.example.json
 ```
 
