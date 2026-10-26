@@ -28,9 +28,10 @@ import argparse
 import json
 import sys
 
-from core.target import Target, ScopeViolation
+from core.target import Target, ScopeViolation, ComplianceError
 from core.library import load, PHASES
 from core.sender import Sender
+from core.detectors import review_status
 
 C_RESET = "\033[0m"; C_RED = "\033[31m"; C_YEL = "\033[33m"
 C_GRN = "\033[32m"; C_DIM = "\033[2m"; C_BOLD = "\033[1m"
@@ -49,7 +50,8 @@ def run(args) -> int:
 
     try:
         target.check_scope()
-    except ScopeViolation as exc:
+        target.check_identification()
+    except (ScopeViolation, ComplianceError) as exc:
         print(f"{C_RED}{exc}{C_RESET}", file=sys.stderr)
         return 3
 
@@ -70,24 +72,31 @@ def run(args) -> int:
 
     sender = Sender(target, history_path=args.history)
     interesting = 0
+    review = 0
     for i, p in enumerate(payloads, 1):
         res = sender.send_payload(p)
         if res.error:
             print(f"{i:>3}. {C_DIM}{p.phase}/{p.id}{C_RESET}  "
                   f"{C_RED}ERROR{C_RESET} {res.error}")
             continue
-        tag = (f"{C_RED}INTERESTING{C_RESET}" if res.interesting
-               else f"{C_DIM}ok{C_RESET}")
+        status = review_status(res.hits)
+        tag = {
+            "interesting": f"{C_RED}INTERESTING{C_RESET}",
+            "review": f"{C_YEL}REVIEW{C_RESET}",
+            "clean": f"{C_DIM}ok{C_RESET}",
+        }[status]
         print(f"{i:>3}. {p.phase}/{p.id}  [{res.status_code}] {res.latency_ms}ms  {tag}")
         for h in res.hits:
             col = _conf_color(h.confidence)
             print(f"      {col}→ [{h.confidence}] {h.detector}{C_RESET}: {h.reason}")
             print(f"        {C_DIM}{h.snippet}{C_RESET}")
-        if res.interesting:
+        if status == "interesting":
             interesting += 1
+        elif status == "review":
+            review += 1
 
     print(f"{C_DIM}{'-'*72}{C_RESET}")
-    print(f"Done. {interesting} interesting of {len(payloads)}. "
+    print(f"Done. {interesting} interesting, {review} to review, of {len(payloads)}. "
           f"Full log: {args.history}")
     return 0
 
@@ -99,17 +108,27 @@ def report(args) -> int:
     except OSError as exc:
         print(f"{C_RED}Cannot read history: {exc}{C_RESET}", file=sys.stderr)
         return 2
-    hot = [r for r in rows if r.get("interesting")]
+    def _row_status(r) -> str:
+        confs = {h.get("confidence") for h in r.get("hits", [])}
+        if "high" in confs:
+            return "interesting"
+        if "medium" in confs:
+            return "review"
+        return "clean"
+
+    hot = [r for r in rows if _row_status(r) == "interesting"]
+    rev = [r for r in rows if _row_status(r) == "review"]
     print(f"{C_BOLD}Review{C_RESET} {args.history}  total={len(rows)}  "
-          f"interesting={len(hot)}")
+          f"interesting={len(hot)}  to-review={len(rev)}")
     print(f"{C_DIM}{'-'*72}{C_RESET}")
-    for r in hot:
-        print(f"{r['phase']}/{r['payload_id']}  [{r.get('status_code')}]  {r['ts']}")
-        print(f"  {C_DIM}sent:{C_RESET} {r['sent_text'][:100]}")
-        for h in r.get("hits", []):
-            col = _conf_color(h.get("confidence", ""))
-            print(f"  {col}→ [{h['confidence']}] {h['detector']}{C_RESET}: {h['reason']}")
-    if not hot:
+    for label, group in (("INTERESTING", hot), ("REVIEW", rev)):
+        for r in group:
+            print(f"{label}  {r['phase']}/{r['payload_id']}  [{r.get('status_code')}]  {r['ts']}")
+            print(f"  {C_DIM}sent:{C_RESET} {r['sent_text'][:100]}")
+            for h in r.get("hits", []):
+                col = _conf_color(h.get("confidence", ""))
+                print(f"  {col}→ [{h['confidence']}] {h['detector']}{C_RESET}: {h['reason']}")
+    if not hot and not rev:
         print(f"{C_GRN}Nothing flagged. Target held up against these probes.{C_RESET}")
     return 0
 

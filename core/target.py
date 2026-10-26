@@ -78,6 +78,8 @@ class Target:
     response_path: str | None = None
     rate_limit_seconds: float = 2.0
     scope_host: str | None = None
+    # Allowlist of in-scope hosts (exact or leading-wildcard "*.example.com").
+    scope_hosts: list = field(default_factory=list)
     timeout: float = 30.0
     # Cross-tenant: a lookup term the probe asks about, and a secret planted in
     # tenant B's knowledge base. Detection is confirmed only if the secret comes
@@ -87,15 +89,22 @@ class Target:
     # Dotted path to the messages array inside body_template, for multi-turn
     # conversations. Defaults to auto-detecting the first list of {role, content}.
     messages_path: str | None = None
+    # Compliance: require identified traffic before sending, and back off on 429.
+    require_identification: bool = True
+    max_retries: int = 2
 
     @classmethod
     def load(cls, path: str) -> "Target":
         with open(path, "r", encoding="utf-8") as fh:
             raw = json.load(fh)
-        scope_host = raw.get("scope_host")
-        if not scope_host:
-            # Default the scope lock to the configured URL's host.
-            scope_host = urlparse(raw["url"]).hostname
+        # Scope allowlist: accept a list (scope_hosts) or a single scope_host, and
+        # default to the configured URL's host when neither is given.
+        scope_hosts = raw.get("scope_hosts")
+        if isinstance(scope_hosts, str):
+            scope_hosts = [scope_hosts]
+        if not scope_hosts:
+            one = raw.get("scope_host") or urlparse(raw["url"]).hostname
+            scope_hosts = [one] if one else []
         ct = raw.get("cross_tenant", {}) or {}
         return cls(
             name=raw.get("name", "unnamed-target"),
@@ -105,20 +114,48 @@ class Target:
             body_template=raw.get("body_template"),
             response_path=raw.get("response_path"),
             rate_limit_seconds=float(raw.get("rate_limit_seconds", 2.0)),
-            scope_host=scope_host,
+            scope_host=scope_hosts[0] if scope_hosts else None,
+            scope_hosts=scope_hosts,
             timeout=float(raw.get("timeout", 30.0)),
             cross_tenant_lookup=ct.get("lookup"),
             cross_tenant_bside=ct.get("bside_secret"),
             messages_path=raw.get("messages_path"),
+            require_identification=bool(raw.get("require_identification", True)),
+            max_retries=int(raw.get("max_retries", 2)),
         )
 
     def check_scope(self) -> None:
-        """Raise if the target URL host is outside the declared scope."""
+        """Raise if the target URL host is outside the declared scope allowlist."""
         host = urlparse(self.url).hostname
-        if self.scope_host and host != self.scope_host:
+        if self.scope_hosts and not _host_in_scope(host, self.scope_hosts):
             raise ScopeViolation(
-                f"URL host {host!r} is outside declared scope {self.scope_host!r}. "
-                "Refusing to send. Fix scope_host in the target profile if this is intended."
+                f"URL host {host!r} is outside declared scope {self.scope_hosts!r}. "
+                "Refusing to send. Fix scope_hosts in the target profile if this is intended."
+            )
+
+    def identification(self) -> tuple[bool, str]:
+        """Is this traffic attributable? Returns (ok, how). Many programs require
+        identified recon — an X-Bug-Bounty-style header or a researcher UA."""
+        hdrs = {k.lower(): (v or "") for k, v in _expand_env(self.headers).items()}
+        for name in ("x-bug-bounty", "x-hackerone-research", "x-bugcrowd-researcher",
+                     "x-researcher", "x-yeswehack"):
+            if hdrs.get(name, "").strip():
+                return True, name
+        ua = hdrs.get("user-agent", "").strip()
+        if ua and "python-requests" not in ua.lower():
+            return True, "user-agent"
+        return False, ""
+
+    def check_identification(self) -> None:
+        """Raise if identified traffic is required but no identifying header is set."""
+        if not self.require_identification:
+            return
+        ok, _ = self.identification()
+        if not ok:
+            raise ComplianceError(
+                "No identifying header set (e.g. X-Bug-Bounty) and require_identification "
+                "is on. Many programs require attributable traffic. Add one to the target "
+                "profile's headers, or set require_identification=false to override."
             )
 
     def build_headers(self) -> dict:
@@ -165,6 +202,25 @@ class Target:
 
 class ScopeViolation(Exception):
     """Raised when a request would leave the declared scope."""
+
+
+class ComplianceError(Exception):
+    """Raised when a send would violate a compliance rail (e.g. unidentified traffic)."""
+
+
+def _host_in_scope(host: str | None, patterns: list) -> bool:
+    """Exact match, or a leading-wildcard '*.example.com' (matches sub.example.com
+    and example.com itself)."""
+    if not host:
+        return False
+    for p in patterns:
+        if not p:
+            continue
+        if p == host:
+            return True
+        if p.startswith("*.") and (host == p[2:] or host.endswith(p[1:])):
+            return True
+    return False
 
 
 def _looks_like_messages(value: Any) -> bool:
