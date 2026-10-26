@@ -83,19 +83,27 @@ class Sender:
             time.sleep(wait)
 
     def _request(self, headers: dict, *, json_body: Any = None, data_body: Any = None):
-        """Do the HTTP request, backing off and retrying on 429/503 while honouring
-        Retry-After, up to target.max_retries extra attempts."""
+        """Do the HTTP request, retrying on transient failures (429/503 — honouring
+        Retry-After — and connection/timeout errors) with exponential backoff, up to
+        target.max_retries extra attempts."""
         attempts = max(0, self.target.max_retries) + 1
         resp = None
         for i in range(attempts):
-            if json_body is not None:
-                resp = self.session.request(
-                    self.target.method, self.target.url, headers=headers,
-                    json=json_body, timeout=self.target.timeout)
-            else:
-                resp = self.session.request(
-                    self.target.method, self.target.url, headers=headers,
-                    data=str(data_body), timeout=self.target.timeout)
+            try:
+                if json_body is not None:
+                    resp = self.session.request(
+                        self.target.method, self.target.url, headers=headers,
+                        json=json_body, timeout=self.target.timeout)
+                else:
+                    resp = self.session.request(
+                        self.target.method, self.target.url, headers=headers,
+                        data=str(data_body), timeout=self.target.timeout)
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout):
+                if i < attempts - 1:
+                    time.sleep(min(2 ** i, 30))
+                    continue
+                raise
             if resp.status_code in (429, 503) and i < attempts - 1:
                 time.sleep(_retry_after(resp) or min(2 ** i, 30))
                 continue
@@ -134,12 +142,7 @@ class Sender:
             self._last_send = time.time()
             result.status_code = resp.status_code
             result.latency_ms = int((time.time() - t0) * 1000)
-            raw_text = resp.text
-            try:
-                resp_json = resp.json()
-            except ValueError:
-                resp_json = None
-            result.reply = self.target.extract_reply(resp_json, raw_text)
+            result.reply = self.target.reply_from_response(resp)
         except ScopeViolation:
             raise
         except Exception as exc:  # network, timeout, etc.
@@ -216,11 +219,7 @@ class Sender:
             self._last_send = time.time()
             result.status_code = resp.status_code
             result.latency_ms = int((time.time() - t0) * 1000)
-            try:
-                resp_json = resp.json()
-            except ValueError:
-                resp_json = None
-            result.reply = self.target.extract_reply(resp_json, resp.text)
+            result.reply = self.target.reply_from_response(resp)
         except ScopeViolation:
             raise
         except Exception as exc:

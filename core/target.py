@@ -92,6 +92,14 @@ class Target:
     # Compliance: require identified traffic before sending, and back off on 429.
     require_identification: bool = True
     max_retries: int = 2
+    # Streaming: when the endpoint answers Server-Sent Events (text/event-stream),
+    # reassemble the reply from the data: chunks. Auto-detected by content-type;
+    # set stream=true to force it. stream_paths are tried per chunk for the delta.
+    stream: bool = False
+    stream_paths: list = field(default_factory=lambda: [
+        "choices.0.delta.content", "choices.0.message.content",
+        "delta.content", "message.content", "content",
+    ])
 
     @classmethod
     def load(cls, path: str) -> "Target":
@@ -122,6 +130,11 @@ class Target:
             messages_path=raw.get("messages_path"),
             require_identification=bool(raw.get("require_identification", True)),
             max_retries=int(raw.get("max_retries", 2)),
+            stream=bool(raw.get("stream", False)),
+            stream_paths=raw.get("stream_paths") or [
+                "choices.0.delta.content", "choices.0.message.content",
+                "delta.content", "message.content", "content",
+            ],
         )
 
     def check_scope(self) -> None:
@@ -199,6 +212,21 @@ class Target:
                 return val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
         return raw_text
 
+    def extract_reply_sse(self, raw_text: str) -> str:
+        """Reassemble a reply from a Server-Sent Events stream."""
+        return parse_sse(raw_text, self.stream_paths)
+
+    def reply_from_response(self, resp) -> str:
+        """Turn an HTTP response into the assistant reply, handling JSON and SSE."""
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if self.stream or "text/event-stream" in ctype:
+            return self.extract_reply_sse(resp.text)
+        try:
+            resp_json = resp.json()
+        except ValueError:
+            resp_json = None
+        return self.extract_reply(resp_json, resp.text)
+
 
 class ScopeViolation(Exception):
     """Raised when a request would leave the declared scope."""
@@ -271,6 +299,34 @@ def _set_path(obj: Any, path: str, value: Any) -> bool:
         cur[last] = value
         return True
     return False
+
+
+def parse_sse(text: str, paths: list) -> str:
+    """Reassemble content from a Server-Sent Events body.
+
+    Concatenates the delta from each `data:` line: JSON chunks are resolved via the
+    first matching dotted path in `paths`; a non-JSON `data:` line is appended as-is.
+    Stops at `[DONE]`.
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]":
+            break
+        try:
+            obj = json.loads(data)
+        except ValueError:
+            out.append(data)
+            continue
+        for p in paths:
+            val = _resolve_path(obj, p)
+            if isinstance(val, str):
+                out.append(val)
+                break
+    return "".join(out)
 
 
 def _resolve_path(obj: Any, path: str) -> Any:
